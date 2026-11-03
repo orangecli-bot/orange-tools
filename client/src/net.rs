@@ -89,7 +89,18 @@ impl Ctx {
         private_dir(&self.cli_dir().join("rooms"))?;
         let (ipath, hpath, lpath) = self.room_paths(room);
         let lock = Lock::take(&lpath)?;
-        let inst = match std::fs::read(&ipath).ok().and_then(|b| postcard::from_bytes::<Instance<ChatRoom>>(&b).ok()) {
+        let mut cached = std::fs::read(&ipath).ok().and_then(|b| postcard::from_bytes::<Instance<ChatRoom>>(&b).ok());
+        if cached.is_none() {
+            // Seed from the running listener's caught-up room (same identity/state dir): instance first,
+            // then its history (history is always >= the instance cursor; duplicates are dropped by id).
+            let ldir = self.state.join("listen").join("rooms");
+            if let Some(i) = std::fs::read(ldir.join(format!("{room}.instance"))).ok().and_then(|b| postcard::from_bytes::<Instance<ChatRoom>>(&b).ok()) {
+                let hist = std::fs::read_to_string(ldir.join(format!("{room}.jsonl"))).unwrap_or_default();
+                write_private(&hpath, hist.as_bytes())?;
+                cached = Some(i);
+            }
+        }
+        let inst = match cached {
             Some(i) => i,
             None => {
                 let loc = self.find_room(room).await?;
@@ -148,5 +159,9 @@ pub fn persist(run: &RoomRun, ipath: &Path, hpath: &Path) -> R<()> {
 }
 
 pub fn history(hpath: &Path) -> Vec<HistLine> {
-    std::fs::read_to_string(hpath).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<HistLine> = std::fs::read_to_string(hpath).unwrap_or_default().lines()
+        .filter_map(|l| serde_json::from_str::<HistLine>(l).ok()).filter(|h| seen.insert(h.id.clone())).collect();
+    out.sort_by_key(|h| h.timestamp_ns);
+    out
 }

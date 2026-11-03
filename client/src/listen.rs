@@ -108,6 +108,13 @@ impl Listener {
             if let Err(e) = write_private(&self.room_file(id), &postcard::to_allocvec(&r.instance).unwrap()) { log!("could not persist room {id}: {e}"); }
         }
     }
+    /// Every decoded text message also goes to listen/rooms/<id>.jsonl, so CLI `read`/`send` can start
+    /// from the listener's caught-up cursor instead of replaying the whole room over the network.
+    fn append_history(&self, id: &Id, t: &Text) {
+        let line = serde_json::json!({"id": message_id(t.author, t.timestamp), "room": id.to_string(), "sender": t.author.to_string(),
+            "mine": t.author == self.me, "timestamp_ns": t.timestamp, "content": t.text});
+        let _ = append_private(&self.dir.join("rooms").join(format!("{id}.jsonl")), &format!("{line}\n"));
+    }
     async fn catalog_response(&mut self, kind: RequestType, response: Response) {
         let subscribed = matches!(response, Response::Read(_, None));
         if let Some(location) = self.catalog.response(&mut self.resolver, kind, response).await {
@@ -151,6 +158,7 @@ impl Listener {
                 let live = room.live;
                 let wm = self.st.rooms.get(&rid).copied().unwrap_or(0);
                 if t.timestamp > wm { self.st.rooms.insert(rid.clone(), t.timestamp); }
+                self.append_history(&id, &t);
                 if new && t.author != self.me { self.deliver(&rid, &t); }
                 if live || new { self.save_state(); self.save_room(&id); }
             }

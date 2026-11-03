@@ -1,0 +1,17 @@
+# systemd --user unit for one subject (install as ~/.config/systemd/user/air-client.service of that user).
+# Generic: everything subject-specific is in ~/.config/air-client/air-client.env.
+[Unit]
+Description=air-client listener (Air push listener -> unread.jsonl, optional wake webhook)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/air-client --config %h/.config/air-client/air-client.env listen
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

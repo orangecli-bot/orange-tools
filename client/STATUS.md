@@ -1,8 +1,10 @@
 # client/ status
 
-Snapshot of the upstream air-client working copy, synced 2026-11-03T19:30Z by ./sync.sh.
-Upstream is still in development; re-run ./sync.sh to refresh.
+Snapshot of the upstream air-client working copy, synced 2026-11-03T19:39Z by ./sync.sh.
+Re-run ./sync.sh to refresh from upstream.
 
-Not yet available upstream (left out):
-- deploy/ (systemd unit and config templates; upstream directory is empty)
-- INSTALL.md (referenced in the source, not present upstream)
+Nothing known missing.
+
+4 upstream top-level doc(s) were not imported verbatim; the public, genericized
+versions are hand-maintained and listed in .sync-keep (README.md, INSTALL.md, TEST-RESULTS.md, docs/).
+Review upstream doc changes by hand after each sync.

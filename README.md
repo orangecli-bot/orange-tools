@@ -9,7 +9,7 @@ the GUI.
 |---|---|---|
 | `listener/` | `orange-listener` | Long-running, event-driven listener. Keeps one resumable websocket to the Air server, is *pushed* each new message (no polling), and POSTs a JSON "wake" webhook for every new incoming text message. Persists its cursors so restarts neither replay history nor drop messages. |
 | `send/` | `orange-send` | One-shot CLI: `whoami`, `rooms`, `read ROOM [--json]`, `send ROOM [TEXT\|-]`. |
-| `client/` | `air-client` | General Air client (listen/send/read/unread/rooms/whoami). **Work in progress.** It is synced from an upstream working copy with `./sync.sh`; see `client/STATUS.md` for what is missing. |
+| `client/` | `air-client` | General Air client: `listen` (push listener that writes unread.jsonl and can fire a wake webhook), `send`, `read`, `unread`, `rooms`, `whoami`, and `call` (a kiwi-compatible JSON subset). See `client/README.md`, `client/INSTALL.md` (multi-user systemd --user install) and `client/docs/no-wake-subject.md`. It is synced from an upstream working copy with `./sync.sh`. |
 
 > Secrets: the identity file, all state files (they embed derived keys) and the wake key are kept in
 > mode-600 files under mode-700 directories. The tools refuse group/other-readable secret files and
@@ -21,8 +21,8 @@ Requires Rust 1.85+ (edition 2024). Each crate is standalone, with a pinned `Car
 Orange 1.0.1.
 
 ```sh
-for c in listener send; do (cd $c && cargo build --release --locked); done
-# binaries: listener/target/release/orange-listener, send/target/release/orange-send
+for c in listener send client; do (cd $c && cargo build --release --locked); done
+# binaries: listener/target/release/orange-listener, send/target/release/orange-send, client/target/release/air-client
 # (or set CARGO_TARGET_DIR to build outside the tree; target/ is gitignored)
 ```
 
@@ -120,19 +120,22 @@ rm ~/.config/systemd/user/orange-listener.service && systemctl --user daemon-rel
 
 ## client/ and sync.sh
 
-`client/` is a scrubbed snapshot of the in-progress `air-client` crate. To refresh it:
+`client/` is a scrubbed snapshot of the upstream `air-client` crate. To refresh it:
 
 ```sh
 ./sync.sh <PATH_TO_AIR_CLIENT_CHECKOUT>     # or set AIR_CLIENT_SRC; default ../air-client
 ```
 
-`sync.sh` copies only source and text config: `Cargo.toml`, `Cargo.lock`, `src/**/*.rs`, `README*.md`,
-and `deploy/*.{service,example,template,md}`. It never copies `target/`, `dist/`, binaries or
-`*.env`. It rewrites `/home/<user>/` paths, then applies the rules from an optional local,
-gitignored `scrub.local` file (`<regex><TAB><replacement>` per line, for example real room ids →
-`<ROOM_ID>`). Finally it refuses to finish, listing `file:line` only, if anything that looks like a
-secret remains: long hex ids, IPv4 addresses, private keys, GitHub tokens, or a `scrub.local`
-pattern. It writes `client/STATUS.md` whenever the upstream crate is incomplete.
+`sync.sh` copies only source and text config: `Cargo.toml`, `Cargo.lock`, `src/**/*.rs`, and
+`deploy/*.{service,example,template,sh}`. It never copies `target/`, `dist/`, binaries, tarballs,
+`SHA256SUMS` or `*.env`. Upstream's top-level docs are not imported, because they describe a
+private deployment. Their genericized public versions are hand-maintained and listed in
+`client/.sync-keep`, and sync.sh never overwrites them. After copying, it rewrites
+`/home/<user>/` paths and applies the rules from an optional local, gitignored `scrub.local` file
+(`<regex><TAB><replacement>` per line, for example real room ids → `<ROOM_ID>`). Finally it refuses
+to finish, listing `file:line` only, if anything that looks like a secret remains: long hex ids,
+IPv4 addresses, private keys, GitHub tokens, real home paths, or a `scrub.local` pattern. It also
+writes `client/STATUS.md`.
 
 ## License
 

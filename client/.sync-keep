@@ -1,0 +1,6 @@
+# Hand-maintained, genericized public files. sync.sh never overwrites these.
+README.md
+INSTALL.md
+TEST-RESULTS.md
+docs/
+deploy/air-client.env.template
