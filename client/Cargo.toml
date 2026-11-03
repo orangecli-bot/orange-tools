@@ -1,0 +1,26 @@
+[package]
+name = "air-client"
+version = "0.1.0"
+edition = "2024"
+description = "Generic headless Air client (listen/send/read/unread/rooms/whoami/call) for any Orange or kiwi identity. Same air 4.0.1 / air_server 2.0.1 stack as Orange 1.0.1."
+
+[dependencies]
+air = "=4.0.1"
+air_server = "=2.0.1"
+crossfire = "3.1.7"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+postcard = { version = "1.1.3", features = ["alloc"] }
+chrono = "0.4"
+hex = "0.4"
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+webpki-roots = "0.26"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+codegen-units = 4

@@ -1,0 +1,25 @@
+[package]
+name = "orange-send"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Headless send/read CLI for an Orange identity: same air 4.0.1 / air_server 2.0.1 path and chk ChatRoom encoding as Orange 1.0.1 (ramp2 3.0.4)."
+
+[dependencies]
+air = "=4.0.1"
+air_server = "=2.0.1"
+crossfire = "3.1.7"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1.1.3", features = ["alloc"] }
+chrono = "0.4"
+hex = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+codegen-units = 4

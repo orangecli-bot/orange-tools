@@ -1,0 +1,19 @@
+[Unit]
+Description=orange-listener: event-driven Air listener for an Orange identity (fires a wake webhook)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Adjust paths to your layout. %h = the user's home directory.
+ExecStart=%h/.local/bin/orange-listener --config %h/.config/orange-listener/orange-listener.env
+Restart=always
+RestartSec=2
+UMask=0077
+NoNewPrivileges=yes
+# Logs go to the user journal: journalctl --user -u orange-listener -f
+# They contain room/sender ids and timings only, never message text, identity or wake key.
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,11 @@
+# build output
+target/
+# never commit configuration with real values, identities, state or tokens
+*.env
+identity/
+*state*
+catalog.bin
+*.pat
+*secret*
+# local-only scrub denylist used by sync.sh
+scrub.local
