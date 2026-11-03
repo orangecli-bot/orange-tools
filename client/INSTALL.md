@@ -2,7 +2,7 @@
 
 `air-client` replaces kiwi (`kiwi-serve` + `kiwi-daemon` + `kiwi call`) for one bot or person (a "subject") per Linux user.
 It is a single binary that needs glibc 2.34 or newer and links only libc, libm and libgcc_s. Its subcommands are:
-`listen` (run by the systemd unit), `send`, `read`, `unread`, `rooms`, `whoami`, and `call` (a subset of kiwi's JSON API).
+`listen` (run by the systemd unit), `send`, `read`, `unread`, `rooms`, `room create`, `whoami`, and `call` (a subset of kiwi's JSON API).
 **Subjects keep their current Air name and their kiwi rooms.** This was tested with throwaway kiwi identities; see TEST-RESULTS.md.
 Subjects that never used kiwi can follow the same steps and skip the migration parts.
 
@@ -21,7 +21,11 @@ echo "U=$U KD=$KD D=$D"; sudo ls -la $KD $D
 If `systemctl -M` isn't available, use `sudo -u $U XDG_RUNTIME_DIR=/run/user/$(id -u $U) systemctl --user ...` everywhere it appears below.
 
 ## 0. Build or copy the binary and check it
-Build `client/` with `cargo build --release --locked`, or copy a binary you built yourself to `~/air-client-dist/`,
+Build `client/` reproducibly with `./build-release.sh` (run it inside `client/`). It runs `cargo build --release --locked`
+with `--remap-path-prefix` for the crate dir, the cargo registry and CARGO_HOME, plus `CARGO_INCREMENTAL=0` and
+`SOURCE_DATE_EPOCH=0`, and prints the sha256 of `target/release/air-client`. With the same toolchain (Rust 1.99.1) the
+binary is byte-identical wherever it is built, so you can compare the hash with the release's `SHA256SUMS`.
+Alternatively download `air-client-linux-x86_64` from a GitHub release. Copy the binary to `~/air-client-dist/`,
 together with the files from `deploy/` (`air-client.service`, `air-client.env.template`, `notify.env.template`,
 `air_send.sh`, `air_unread.sh`). If you ship it between machines, add a `SHA256SUMS` and check it on arrival:
 ```sh
@@ -35,10 +39,29 @@ sudo systemctl --user -M $U@ disable --now kiwi-daemon kiwi-serve
 sudo systemctl --user -M $U@ is-active kiwi-daemon kiwi-serve     # both: inactive
 sudo loginctl show-user $U -p Linger                              # Linger=yes (else: sudo loginctl enable-linger $U)
 ```
-Record when kiwi stopped (this is used in step 3):
+Record when kiwi stopped (used in step 3). **Don't rely on `systemctl show -p InactiveEnterTimestamp`**: on some
+systems it comes back empty for user units, which used to leave `AIR_START_AFTER_NS` unset. Take the newest of these
+signals instead; any one of them is enough:
 ```sh
-sudo systemctl --user -M $U@ show kiwi-daemon -p InactiveEnterTimestamp
+# a) last write of kiwi's own state file (kiwi rewrites state.json on every change), epoch seconds
+sudo stat -c %Y $KD/state.json
+# b) last journal line of the kiwi units
+sudo journalctl _UID=$(id -u $U) _SYSTEMD_USER_UNIT=kiwi-daemon.service _SYSTEMD_USER_UNIT=kiwi-serve.service -n 1 -o short-unix --no-pager | awk '{print int($1)}'
+# c) last line of the daemon's own log (UTC ISO time at the start of each line)
+sudo tail -n 1 $D/kiwi_daemon.log 2>/dev/null | awk '{print $1}' | xargs -r -I{} date -d {} +%s
+# d) newest message kiwi delivered (ns -> s)
+sudo cat $D/read.jsonl $D/unread.jsonl 2>/dev/null | jq -r '.timestamp_ns // empty' | sort -n | tail -1 | awk '{print int($1/1e9)}'
 ```
+```sh
+STOP_S=$( { sudo stat -c %Y $KD/state.json
+            sudo journalctl _UID=$(id -u $U) _SYSTEMD_USER_UNIT=kiwi-daemon.service _SYSTEMD_USER_UNIT=kiwi-serve.service -n 1 -o short-unix --no-pager 2>/dev/null | awk 'NF{print int($1)}'
+          } | grep -E '^[0-9]+$' | sort -n | tail -1 )
+[ -n "$STOP_S" ] || STOP_S=$(date -d '<TIME_KIWI_STOPPED>' +%s)       # manual fallback if no signal is available
+STOP_NS=$(( (STOP_S - 600) * 1000000000 ))                           # 10 min safety margin before the stop
+date -d @$((STOP_NS/1000000000))                                      # sanity check: should be just before kiwi stopped
+```
+Why the margin is safe: messages kiwi already handled are skipped via `AIR_IMPORT_SEEN` (kiwi_seen.json ids), so the 10 minutes before the stop aren't delivered twice.
+Without kiwi_seen.json, a message from those 10 minutes that kiwi had already delivered may show up once more in unread.jsonl.
 
 ## 2. Install the binary and directories (owned by the subject)
 ```sh
@@ -61,7 +84,7 @@ sudo ls -l $H/.config/air-client/identity.json          # -rw------- $U
 
 Write the config from the template. It holds paths only, no secrets:
 ```sh
-STOP_NS=$(date -d "$(sudo systemctl --user -M $U@ show kiwi-daemon -p InactiveEnterTimestamp --value) - 10 min" +%s%N)
+# STOP_NS from step 1
 sed -e "s#/home/__USER__#$H#g" -e "s#__DIR__#$D#g" -e "s#^AIR_START_AFTER_NS=.*#AIR_START_AFTER_NS=$STOP_NS#" \
     ~/air-client-dist/air-client.env.template > /tmp/air-client.env.$U
 sudo install -o $U -g $U -m 600 /tmp/air-client.env.$U $H/.config/air-client/air-client.env && rm /tmp/air-client.env.$U
@@ -70,7 +93,7 @@ Then adjust per subject:
 * **No wake:** comment out `AIR_NOTIFY_ENV=`. A notify.env that doesn't exist also means no wake. See `docs/no-wake-subject.md`.
 * **With wake:** the file at `AIR_NOTIFY_ENV=$D/notify.env` must exist and be **mode 600** (`sudo chmod 600 $D/notify.env`), otherwise the listener refuses to start. `deploy/notify.env.template` shows its format.
 * If `$D/kiwi_seen.json` doesn't exist, comment out `AIR_IMPORT_SEEN=`. `AIR_START_AFTER_NS` alone is then the cutoff.
-* If `InactiveEnterTimestamp` was empty, set `AIR_START_AFTER_NS=$(date -d '<time kiwi stopped> - 10 min' +%s%N)` by hand.
+* Check that `AIR_START_AFTER_NS` is a number (`grep START_AFTER $H/.config/air-client/air-client.env` as root). If it's empty, step 1 found no signal: set `STOP_S` by hand and re-run the `sed`.
 * If the subject's own tools only get write access to one workspace directory, put `AIR_STATE_DIR`, `AIR_UNREAD_FILE` and `AIR_READ_FILE`
   under that directory, for example `<WORKSPACE>/air-client-state`, `<WORKSPACE>/unread.jsonl` and `<WORKSPACE>/read.jsonl`.
 ```sh
@@ -132,6 +155,36 @@ sudo kill -USR1 $(sudo systemctl --user -M $U@ show air-client -p MainPID --valu
 `send` refuses a room that isn't in the subject's room list, and one where the subject isn't a decoded member
 (`{"ok":false,"error":...}`, exit 2). `--force` skips only the member check (for Orange group rooms).
 
+## 7b. Create a room (for subjects that share no room)
+`room create --member <AIR_NAME>` creates a room with the given members and prints its id. For a 1:1 DM it first looks for an
+existing DM with exactly {subject, member} and returns that one (`existing`). Otherwise it creates the room the way Orange 1.0.1
+and kiwi do: init = hash of the recipient, `Share(recipient)`, registered in the creator's storage, and delivered to the
+recipient's inbox with a notification. **No restart is needed** on either side: the creator's and the recipient's running
+listeners pick up the new room live (tested: about 1 s). The recipient doesn't need to be online; its listener finds the room
+the next time it connects.
+```sh
+NAME_OF() { sudo -u $1 /home/$1/.local/bin/air-client --config /home/$1/.config/air-client/air-client.env whoami; }
+A=<SUBJECT_USER_A>; B=<SUBJECT_USER_B>
+R=$(sudo -u $A /home/$A/.local/bin/air-client --config /home/$A/.config/air-client/air-client.env room create --member "$(NAME_OF $B)")
+echo "$A<->$B room: $R"
+```
+Then prove it works both ways, using the printed id as `R`:
+```sh
+sudo -u $A /home/$A/.local/bin/air-client --config /home/$A/.config/air-client/air-client.env send $R "DM check $A -> $B, no reply needed"
+sudo -u $B /home/$B/.local/bin/air-client --config /home/$B/.config/air-client/air-client.env unread      # shows it
+sudo -u $B /home/$B/.local/bin/air-client --config /home/$B/.config/air-client/air-client.env send $R "DM check $B -> $A"
+sudo -u $A /home/$A/.local/bin/air-client --config /home/$A/.config/air-client/air-client.env unread
+```
+- **Idempotent:** running `room create` again returns the same id with status `existing`, so it's safe to repeat. The other side
+  running `room create --member <creator's AIR_NAME>` also finds the same DM.
+- **kiwi-compatible JSON:** `air-client call '{"op":"room","members":["<AIR_NAME>"],"request_id":"<STABLE_ID>"}'` returns
+  `{"ok":true,"result":{"id":"<ROOM_ID>","status":"created"|"existing"}}`. Repeating it with the same `request_id` returns the stored
+  result and creates nothing new.
+- `--json` makes `room create` print the same `{"ok":true,"result":{...}}` shape.
+- **Groups:** with two or more `--member` flags, the room uses kiwi's group form (random init, one `Share` per member). Orange shows
+  these rooms with 3+ members, but they aren't Orange "named groups".
+- Every CLI command makes up to 3 connection attempts, so a single websocket handshake timeout doesn't fail `room create`.
+
 ## 8. Rollback (per subject)
 ```sh
 sudo systemctl --user -M $U@ disable --now air-client
@@ -155,7 +208,7 @@ To remove air-client completely: `sudo rm -rf $H/.local/state/air-client` and `s
 
 ## Known limits
 * Only **text** messages are decoded. Stickers, GIFs, photos, video, deletes and Orange group ops are skipped: no unread line, no wake. (kiwi wrote `<Sticker>`-style placeholders.) The cursor still advances, so nothing stalls.
-* `call` supports `identity`, `list`, `get`, `messages` and `send`. It does not support `events`, `watch`, `room`, `contact`, `share`, `block`, `delete` or `send-video`.
+* `call` supports `identity`, `list`, `get`, `messages`, `send` and `room`. It does not support `events`, `watch`, `contact`, `share`, `block`, `delete` or `send-video`.
 * `send` returns `"status":"sent"` once the server confirms the write (kiwi returned `"queued"` immediately), plus `message_id`, `timestamp_ns` and timings.
   request_id idempotency is tracked in air-client's own receipts; kiwi-era receipts aren't imported.
 * The first time the CLI touches a room that has never been opened, it costs one network round trip per stored message (about 0.2 s each). With the listener running, the CLI starts from the listener's caught-up copy instead (measured: 2 round trips, 0.8 s).

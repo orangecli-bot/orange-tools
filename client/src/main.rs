@@ -17,11 +17,14 @@ const USAGE: &str = "usage: air-client [--config FILE] [--identity FILE] [--stat
   send ROOM [TEXT|-] [--request-id ID] [--force]
                                    send TEXT (stdin when '-' or omitted); ROOM must be one of this identity's rooms
                                    and the identity must be a decoded member. Prints kiwi-style {\"ok\":true,\"result\":{...}}
+  room create --member NAME [--member NAME ...] [--json]
+                                   create a room (DM: reuses an existing DM with that member, else Orange/kiwi's
+                                   deterministic DM init); prints the room id
   unread [--json]                  print new messages recorded by `listen` and mark them read (air_unread.sh)
-  call JSON|-                      kiwi-compatible JSON API subset: identity, list, get, messages, send
+  call JSON|-                      kiwi-compatible JSON API subset: identity, list, get, messages, send, room
   listen                           long-lived listener: unread.jsonl + optional batched wake webhook
 config: env file (mode 600) via --config or AIR_CLIENT_CONFIG; keys AIR_IDENTITY_FILE, AIR_STATE_DIR, AIR_NOTIFY_ENV,
-        AIR_WAKE_FORMAT, AIR_WAKE_BATCH_MS, AIR_UNREAD_FILE, AIR_READ_FILE, AIR_CONTACTS_FILE, AIR_IMPORT_SEEN,
+        AIR_WAKE_FORMAT, AIR_WAKE_BATCH_MS, AIR_WAKE_SOURCE, AIR_UNREAD_FILE, AIR_READ_FILE, AIR_CONTACTS_FILE, AIR_IMPORT_SEEN,
         AIR_START_AFTER_NS (see INSTALL.md)";
 
 #[tokio::main]
@@ -56,6 +59,8 @@ async fn run(args: &mut Vec<String>) -> R<()> {
     if args.iter().any(|a| a == "-h" || a == "--help" || a == "help") || args.is_empty() { println!("{USAGE}"); return Ok(()); }
     let mut flags: HashMap<&'static str, String> = HashMap::new();
     for k in ["--config", "--identity", "--state"] { if let Some(v) = take_opt(args, k) { flags.insert(k, v); } }
+    let mut room_members: Vec<String> = vec![];
+    while let Some(m) = take_opt(args, "--member") { room_members.push(m); }
     let n: usize = take_opt(args, "-n").and_then(|v| v.parse().ok()).unwrap_or(10);
     let request_id = take_opt(args, "--request-id");
     let json = take_flag(args, "--json");
@@ -128,6 +133,14 @@ async fn run(args: &mut Vec<String>) -> R<()> {
             let out = do_send(&mut ctx, &cfg, &room, &text, request_id, force, &leaks).await?;
             println!("{out}");
         }
+        "room" => {
+            if args.get(1).map(String::as_str) != Some("create") { return Err(USAGE.into()); }
+            let mut names = room_members.clone();
+            names.extend(args.iter().skip(2).cloned());
+            let (id, status, _) = create_room(&mut ctx, &cfg, &names, request_id).await?;
+            if json { println!("{}", serde_json::json!({"ok": true, "result": {"id": id, "status": status}})); }
+            else { eprintln!("room {status}"); println!("{id}"); }
+        }
         "call" => {
             let raw = match args.get(1).map(String::as_str) { Some("-") | None => read_stdin()?, Some(s) => s.to_string() };
             let req: serde_json::Value = serde_json::from_str(raw.trim()).map_err(|e| format!("bad JSON request: {e}"))?;
@@ -198,6 +211,32 @@ async fn do_send(ctx: &mut Ctx, cfg: &Config, room: &str, text: &str, request_id
     Ok(serde_json::json!({"ok": true, "result": result}))
 }
 
+/// Room creation with optional request_id idempotency (same receipts file as send).
+async fn create_room(ctx: &mut Ctx, cfg: &Config, names: &[String], request_id: Option<String>) -> R<(String, String, usize)> {
+    let mut members = vec![];
+    for n in names { members.push(n.parse::<air::Name>().map_err(|_| format!("not an Air name: {n:?}"))?); }
+    if members.is_empty() { return Err("at least one recipient is required (--member NAME)".into()); }
+    private_dir(&cfg.state_dir.join("cli"))?;
+    let _rlock = Lock::take(&cfg.state_dir.join("cli").join("receipts.lock"))?;
+    let mut key: Vec<String> = members.iter().map(|m| m.to_string()).collect();
+    key.sort();
+    let key = key.join(",");
+    if let Some(rid) = &request_id {
+        for line in std::fs::read_to_string(receipts_path(cfg)).unwrap_or_default().lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+            if v["request_id"] == *rid {
+                if v["op"] != "room" || v["members"] != key { return Err("request_id already used for different arguments".into()); }
+                return Ok((v["result"]["id"].as_str().unwrap_or("").to_string(), v["result"]["status"].as_str().unwrap_or("").to_string(), 0));
+            }
+        }
+    }
+    let (id, status, trips) = ctx.create_room(members).await?;
+    if let Some(rid) = request_id {
+        append_private(&receipts_path(cfg), &format!("{}\n", serde_json::json!({"request_id": rid, "op": "room", "members": key, "result": {"id": id, "status": status}})))?;
+    }
+    Ok((id, status.to_string(), trips))
+}
+
 fn text_sha(t: &str) -> String { air::Id::hash(&t.to_string()).to_string() }
 
 /// kiwi's message JSON: {body:{Text}, author, timestamp, hidden_from, id}.
@@ -259,6 +298,12 @@ async fn call(ctx: &mut Ctx, cfg: &Config, req: &serde_json::Value, leaks: &[Str
             let rid = s("request_id").filter(|r| !r.is_empty()).ok_or("mutations require a stable request_id; reuse it when retrying")?;
             do_send(ctx, cfg, &id, &text, Some(rid), req["force"] == true, leaks).await
         }
-        op => Err(format!("op {op:?} not supported by air-client (supported: identity, list, get, messages, send)")),
+        "room" => {
+            let names: Vec<String> = req["members"].as_array().ok_or("missing members array")?
+                .iter().map(|v| v.as_str().map(String::from).ok_or("members must be strings")).collect::<Result<_, _>>()?;
+            let (id, status, _) = create_room(ctx, cfg, &names, s("request_id").filter(|r| !r.is_empty())).await?;
+            ok(serde_json::json!({"id": id, "status": status}))
+        }
+        op => Err(format!("op {op:?} not supported by air-client (supported: identity, list, get, messages, send, room)")),
     }
 }

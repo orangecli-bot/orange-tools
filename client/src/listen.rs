@@ -188,7 +188,7 @@ impl Listener {
             WakeFormat::Orange => {
                 let mut c: String = t.text.chars().take(2000).collect();
                 if t.text.chars().count() > 2000 { c.push('…'); }
-                serde_json::json!({"event": "orange_message", "source": "air-client", "me": self.me.to_string(),
+                serde_json::json!({"event": "orange_message", "source": self.cfg.wake_source, "me": self.me.to_string(),
                     "sender": sender, "room": rid, "content": c, "ts": t.timestamp / 1_000_000_000, "ts_ns": t.timestamp})
             }
         });

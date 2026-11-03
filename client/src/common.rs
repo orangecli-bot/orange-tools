@@ -117,6 +117,7 @@ pub struct Config {
     pub notify_env: Option<PathBuf>,
     pub wake_format: WakeFormat,
     pub wake_batch_ms: u64,
+    pub wake_source: String,
     pub import_seen: Option<PathBuf>,
     pub start_after_ns: Option<u64>,
 }
@@ -148,6 +149,7 @@ pub fn load_config(flags: &HashMap<&'static str, String>) -> R<Config> {
         notify_env: get("AIR_NOTIFY_ENV").map(PathBuf::from),
         wake_format,
         wake_batch_ms: get("AIR_WAKE_BATCH_MS").and_then(|v| v.parse().ok()).unwrap_or(1500),
+        wake_source: get("AIR_WAKE_SOURCE").unwrap_or_else(|| "air-client".into()),
         import_seen: get("AIR_IMPORT_SEEN").map(PathBuf::from),
         start_after_ns: get("AIR_START_AFTER_NS").and_then(|v| v.parse().ok()),
     })

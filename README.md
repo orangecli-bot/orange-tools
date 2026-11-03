@@ -9,7 +9,7 @@ the GUI.
 |---|---|---|
 | `listener/` | `orange-listener` | Long-running, event-driven listener. Keeps one resumable websocket to the Air server, is *pushed* each new message (no polling), and POSTs a JSON "wake" webhook for every new incoming text message. Persists its cursors so restarts neither replay history nor drop messages. |
 | `send/` | `orange-send` | One-shot CLI: `whoami`, `rooms`, `read ROOM [--json]`, `send ROOM [TEXT\|-]`. |
-| `client/` | `air-client` | General Air client: `listen` (push listener that writes unread.jsonl and can fire a wake webhook), `send`, `read`, `unread`, `rooms`, `whoami`, and `call` (a kiwi-compatible JSON subset). See `client/README.md`, `client/INSTALL.md` (multi-user systemd --user install) and `client/docs/no-wake-subject.md`. It is synced from an upstream working copy with `./sync.sh`. |
+| `client/` | `air-client` | General Air client: `listen` (push listener that writes unread.jsonl and can fire a wake webhook), `send`, `read`, `unread`, `rooms`, `room create`, `whoami`, and `call` (a kiwi-compatible JSON subset, including `{"op":"room"}`). Reproducible build: `client/build-release.sh`. See `client/README.md`, `client/INSTALL.md` (multi-user systemd --user install) and `client/docs/no-wake-subject.md`. It is synced from an upstream working copy with `./sync.sh`. |
 
 > Secrets: the identity file, all state files (they embed derived keys) and the wake key are kept in
 > mode-600 files under mode-700 directories. The tools refuse group/other-readable secret files and

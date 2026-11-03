@@ -24,9 +24,17 @@ impl Ctx {
     pub async fn client(&mut self) -> R<&Client> {
         if self.client.is_none() {
             let server: std::sync::Arc<Identity> = self.resolver.resolve(Name::orange_me(), None).await;
-            let c = tokio::time::timeout(TIMEOUT, Client::new((*server).clone(), "wss")).await
-                .map_err(|_| "connect timeout".to_string())??;
-            self.client = Some(c);
+            // Up to 3 attempts (250 ms, 1 s backoff): a single websocket handshake can time out.
+            let mut last = String::new();
+            for (i, wait) in [0u64, 250, 1000].into_iter().enumerate() {
+                tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                match tokio::time::timeout(TIMEOUT, Client::new((*server).clone(), "wss")).await {
+                    Ok(Ok(c)) => { self.client = Some(c); break; }
+                    Ok(Err(e)) => last = format!("connect attempt {}: {e}", i + 1),
+                    Err(_) => last = format!("connect attempt {}: timeout", i + 1),
+                }
+            }
+            if self.client.is_none() { return Err(last); }
         }
         Ok(self.client.as_ref().unwrap())
     }
@@ -164,4 +172,107 @@ pub fn history(hpath: &Path) -> Vec<HistLine> {
         .filter_map(|l| serde_json::from_str::<HistLine>(l).ok()).filter(|h| seen.insert(h.id.clone())).collect();
     out.sort_by_key(|h| h.timestamp_ns);
     out
+}
+
+// ---- room creation -------------------------------------------------------------------------------
+impl Ctx {
+    /// Decoded members of every room in this identity's room list (catches each room up; rooms the
+    /// listener already follows are seeded from its caught-up copy, so this is cheap when it runs).
+    pub async fn room_members(&mut self) -> R<Vec<(String, Vec<Name>, usize)>> {
+        let (rooms, _) = self.refresh_rooms().await?;
+        let mut out = vec![];
+        for loc in rooms {
+            let id = Id::hash(&loc).to_string();
+            let (mut run, _l, ip, hp) = self.open_room(&id).await?;
+            self.drive(&mut run, None, false).await?;
+            persist(&run, &ip, &hp)?;
+            let members = run.inst.confirmed().map(|c| c.members.clone()).unwrap_or_default();
+            out.push((id, members, history(&hp).len()));
+        }
+        Ok(out)
+    }
+
+    /// Sequentially drive the given Air channels until none of them wants another request.
+    async fn drive_air(&mut self, air: &mut air::Air, wanted: &dyn Fn(&RequestType) -> bool) -> R<usize> {
+        let mut trips = 0;
+        loop {
+            let reqs: Vec<(RequestType, Request)> = air.requests().into_iter().filter(|(k, _)| wanted(k)).collect();
+            if reqs.is_empty() { return Ok(trips); }
+            for (kind, req) in reqs {
+                let resp = self.roundtrip(req).await?;
+                trips += 1;
+                air.response(&mut self.resolver, kind, resp).await;
+                if trips > 20000 { return Err("Air channel sync did not converge".into()); }
+            }
+        }
+    }
+
+    /// Create a ChatRoom with `recipients` exactly like Orange 1.0.1 / kiwi do for DMs:
+    /// init = Id::hash(&recipient) (deterministic per creator), Share(recipient) action, location
+    /// registered in our STORAGE channel and delivered to the recipient's inbox (shared-key channel +
+    /// notification). Groups (2+ recipients) use kiwi's form: random init + Share per member.
+    /// For a DM, an existing room whose decoded members are exactly {me, recipient} is returned
+    /// instead (Orange's rule: prefer one with messages, then the lowest room id).
+    pub async fn create_room(&mut self, members: Vec<Name>) -> R<(String, &'static str, usize)> {
+        let me = self.me;
+        let mut recipients: Vec<Name> = members.into_iter().filter(|n| *n != me).collect();
+        recipients.sort_unstable();
+        recipients.dedup();
+        if recipients.is_empty() { return Err("at least one recipient other than this identity is required".into()); }
+        if recipients.len() == 1 {
+            let r = recipients[0];
+            let mut existing: Vec<(bool, String)> = self.room_members().await?.into_iter()
+                .filter(|(_, m, _)| m.contains(&me) && m.contains(&r) && m.iter().all(|n| *n == me || *n == r))
+                .map(|(id, _, n)| (n == 0, id)).collect();
+            existing.sort();
+            if let Some((_, id)) = existing.into_iter().next() { return Ok((id, "existing", 0)); }
+        }
+        // Start from the listener's catalog when present (cursors near the head), else fresh.
+        let mut air = std::fs::read(self.state.join("listen").join("catalog.bin")).ok()
+            .and_then(|b| postcard::from_bytes::<air::Air>(&b).ok())
+            .map(Ok).unwrap_or_else(|| air::Air::new(self.secret.clone()).map_err(|e| format!("{e:?}")))?;
+        // Phase 1: storage caught up first, so we never re-register a location that is already stored.
+        let _ = air.start();
+        let mut trips = self.drive_air(&mut air, &|k| *k == RequestType::Storage).await?;
+        let init = if recipients.len() == 1 { Id::hash(&recipients[0]) } else { Id::random() };
+        let mut inst: Instance<ChatRoom> = air.create(init).map_err(|e| format!("{e:?}"))?;
+        let location = *inst.location();
+        let id = Id::hash(&location).to_string();
+        if self.cached_locations().iter().any(|l| Id::hash(l).to_string() == id) {
+            return Ok((id, "existing", trips));
+        }
+        for r in &recipients {
+            air.share(&mut self.resolver, *r, location).await;
+            inst.send(ChatRoomAction::Share(*r));
+        }
+        // Phase 2: write the room channel (Init + Shares) and wait until it's confirmed.
+        let mut run = RoomRun { inst, new: vec![], reads: 0, garbage: 0, room: id.clone() };
+        let mut req = run.inst.start();
+        loop {
+            let resp = self.roundtrip(req).await?;
+            run.reads += 1;
+            let out = run.inst.response(&mut self.resolver, resp).await;
+            if let Output::Read(Some(t), _) | Output::Created(Some(t), _) = &out { record(&mut run, self.me, t); }
+            match run.inst.request() { Some(r) => req = r, None => break }
+            if matches!(out, Output::Subscribed) && run.inst.confirmed().is_some_and(|c| recipients.iter().all(|r| c.members.contains(r))) { break; }
+            if run.reads > 1000 { return Err("room write did not converge".into()); }
+        }
+        trips += run.reads;
+        // Phase 3: register in STORAGE and deliver to each recipient's inbox (+ notification).
+        let rs = recipients.clone();
+        trips += self.drive_air(&mut air, &move |k| match k {
+            RequestType::Storage => true,
+            RequestType::Inbox(air::inbox::RequestType::Channel(n)) | RequestType::Inbox(air::inbox::RequestType::Notifying(n)) => rs.contains(n),
+            RequestType::Inbox(air::inbox::RequestType::Notified) => true,
+            _ => false,
+        }).await?;
+        // Cache the new room for later CLI read/send.
+        private_dir(&self.cli_dir().join("rooms"))?;
+        let (ip, hp, _) = self.room_paths(&id);
+        persist(&run, &ip, &hp)?;
+        let mut locs: Vec<Location> = std::fs::read(self.locations_path()).ok().and_then(|b| postcard::from_bytes(&b).ok()).unwrap_or_default();
+        if !locs.contains(&location) { locs.push(location); }
+        write_private(&self.locations_path(), &postcard::to_allocvec(&locs).unwrap())?;
+        Ok((id, "created", trips))
+    }
 }

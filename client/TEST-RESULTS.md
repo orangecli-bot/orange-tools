@@ -5,7 +5,7 @@ glibc: the highest symbol version needed is GLIBC_2.34. Links only libc, libm, l
 All test identities, state, configs and the local webhook receiver lived in a scratch directory outside the source tree.
 kiwi for the tests: a local kiwi build (air 3.0.0 + chk e2a15c6), run only with fresh `--data-dir`s.
 No real person or other bot was messaged. Sends went only to throwaway rooms.
-Ids below are placeholders: `<ROOM_ID>`, `<NAME_A>`, `<NAME_B>`, `<MSG_ID_1>`, `<MSG_ID_2>`.
+Ids below are placeholders (`<ROOM_ID…>`, `<NAME_…>`, `<MSG_ID_…>`, `<STABLE_ID>`).
 
 ## Q: Does a kiwi (air 3.0.0) identity keep its name on air 4.0.1 / Orange? **Yes. Tested.**
 Source analysis (air-3.0.0 vs air-4.0.1 crates):
@@ -39,7 +39,7 @@ Not tested here: identities with very large room histories, and kiwi rooms that 
 |---|---|
 | fresh start, no notify.env | `wake off`; history not re-fired (baseline = first start); room `caught up, live` 3 s after start |
 | restart after kiwi B sent #5 while A's listener was down | #5 delivered on restart (`server_write→received 4644 ms`, i.e. the downtime); cursors resumed from the persisted catalog |
-| wake on (local test receiver on 127.0.0.1, test key) | `{"event":"air_message","count":1,"messages":[{"sender","room","timestamp"}]}`, `Authorization: Bearer` correct, `Content-Type: application/json`, HTTP 200 |
+| wake on (local test receiver on localhost, test key) | `{"event":"air_message","count":1,"messages":[{"sender","room","timestamp"}]}`, `Authorization: Bearer` correct, `Content-Type: application/json`, HTTP 200 |
 | burst of 3 messages (#6–#8) within about 0.5 s | **one** POST with `count:3` (batch window 1500 ms) |
 | unread.jsonl line shape | `{"from":"unknown","sender":…,"room":…,"timestamp_ns":…,"content":…}`, in kiwi_daemon.sh key order |
 | `AIR_IMPORT_SEEN` = simulated kiwi_seen.json (all ids except #3) | the first replay delivered exactly #3 (the one missing from kiwi_seen) plus the live #9, nothing else |
@@ -70,3 +70,32 @@ Not tested here: identities with very large room histories, and kiwi rooms that 
 - Real wake endpoints. Only a local HTTP receiver was used; the HTTPS path is orange-listener's code, which runs in production.
 - Orange group rooms (AddMember etc.): membership may not decode, so use `send --force`. Stickers, photos and video aren't decoded.
 - Sandboxed agent shells and their filesystem/network permissions (see docs/no-wake-subject.md).
+
+## Room creation (2026-11-03)
+Two more throwaway identities were used: C (kiwi serve) and D (air-client listener on a kiwi state.json). Neither shared a room with A.
+| test | result |
+|---|---|
+| `air-client room create --member <NAME_C> --json` (A, listener running) | `{"ok":true,"result":{"id":"<ROOM_ID_AC>","status":"created"}}` in 4.0 s |
+| A's running listener | `catalog: new location` → `room <ROOM_ID_AC>: following` → `caught up, live` about 1 s later; **no restart** |
+| **kiwi C** `list` | shows room `<ROOM_ID_AC>` with members [A, C] |
+| A→C `send` (2 round trips); kiwi C | message visible in kiwi C |
+| kiwi C → A | A's unread.jsonl got it (72 ms), plus one wake POST `{"event":"air_message","count":1,…}` |
+| the same `room create` again | `"status":"existing"`, same id |
+| `call {"op":"room","members":["<NAME_D>"],"request_id":"<STABLE_ID>"}` (A) | `{"ok":true,"result":{"id":"<ROOM_ID_AD>","status":"created"}}` |
+| D's running listener (recipient side) | picked the room up live through the inbox notification (`following` → `live`), **no restart** |
+| A→D and D→A sends | each landed in the other's unread.jsonl |
+| the same call with the same request_id | same result (from the receipt), nothing new created |
+| D `room create --member <NAME_A>` | `existing` → `<ROOM_ID_AD>` (finds the DM A created; Orange's rule) |
+| B with a **fresh state dir** (no listener catalog) `room create --member <NAME_D>` | first try: `websocket connection timed out` (a single handshake timeout; fixed by giving every CLI command 3 connect attempts); second try: created; a B→D message reached D's unread |
+| group: A `room create --member <NAME_B> --member <NAME_C>` | created `<ROOM_ID_ABC>`; kiwi C lists it with 3 members |
+
+DM id derivation matches Orange 1.0.1 and kiwi: `Instance::new(secret, Id::hash(&recipient))` (air 4.0.1 `Air::create`), so the same creator always gets the same DM location.
+Before creating a DM, air-client reuses any existing DM with exactly {me, recipient}, so a DM the other side created earlier is found (tested: D→A).
+
+## Kiwi stop-time fix
+`systemctl show -p InactiveEnterTimestamp` came back empty for the kiwi user units on a real server, which would have left `AIR_START_AFTER_NS` unset.
+INSTALL.md step 1 now takes the newest of several signals instead: the state.json mtime, the last kiwi journal line, the daemon log, and the newest delivered message. It falls back to a manual time and keeps the 10-minute margin.
+
+## Reproducible build
+- `./build-release.sh` (`cargo build --release --locked` with `--remap-path-prefix` for the crate dir, the registry and CARGO_HOME, plus `CARGO_INCREMENTAL=0` and `SOURCE_DATE_EPOCH=0`; Rust 1.99.1) was run in two places: the upstream working tree, and `client/` of this repo after `./sync.sh`. Both builds produced the same sha256, the one published in the v0.2.0 release's `SHA256SUMS`. `strings` finds no local paths in the binary. The highest glibc symbol version it needs is GLIBC_2.34.
+- Smoke test of that binary: the help text says "see INSTALL.md"; `room create` on an existing A–C DM returned `existing`; a send A→C returned ok.

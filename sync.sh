@@ -3,7 +3,7 @@
 #
 #   ./sync.sh [SOURCE_DIR]        (default: $AIR_CLIENT_SRC, else ../air-client)
 #
-# Copies ONLY source and text config: Cargo.toml, Cargo.lock, src/**/*.rs, and deploy/ text files
+# Copies ONLY source and text config: Cargo.toml, Cargo.lock, build-release.sh, src/**/*.rs, and deploy/ text files
 # (*.service, *.example, *.template, *.sh shims). Never copies target/, dist/, tarballs, SHA256SUMS,
 # binaries, *.env, identity/state files, keys or tokens.
 #
@@ -33,7 +33,7 @@ copy() { local rel="$1"; mkdir -p "$dst.tmp/$(dirname "$rel")"; cp "$src/$rel" "
 keep=()
 [ -f "$dst/.sync-keep" ] && while read -r k; do [[ -z "$k" || "$k" == \#* ]] || keep+=("$k"); done < "$dst/.sync-keep"
 is_kept() { local k; for k in "${keep[@]}"; do [[ "$1" == "$k" || ( "$k" == */ && "$1" == "$k"* ) ]] && return 0; done; return 1; }
-for f in Cargo.toml Cargo.lock; do [ -f "$src/$f" ] && copy "$f"; done
+for f in Cargo.toml Cargo.lock build-release.sh; do [ -f "$src/$f" ] && ! is_kept "$f" && copy "$f"; done
 ( cd "$src" && find src -type f -name '*.rs' 2>/dev/null; \
   find deploy -type f \( -name '*.service' -o -name '*.example' -o -name '*.template' -o -name '*.sh' \) 2>/dev/null ) \
   | sort -u | while read -r rel; do is_kept "$rel" || copy "$rel"; done
